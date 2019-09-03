@@ -165,6 +165,7 @@ class BertModel(tf.keras.layers.Layer):
         max_position_embeddings=self.config.max_position_embeddings,
         dropout_prob=self.config.hidden_dropout_prob,
         initializer_range=self.config.initializer_range,
+        dtype=tf.float32,
         name="embedding_postprocessor")
     self.encoder = Transformer(
         num_hidden_layers=self.config.num_hidden_layers,
@@ -276,6 +277,7 @@ class EmbeddingPostprocessor(tf.keras.layers.Layer):
                max_position_embeddings=512,
                dropout_prob=0.0,
                initializer_range=0.02,
+               initializer=None,
                **kwargs):
     super(EmbeddingPostprocessor, self).__init__(**kwargs)
     self.use_type_embeddings = use_type_embeddings
@@ -284,6 +286,11 @@ class EmbeddingPostprocessor(tf.keras.layers.Layer):
     self.max_position_embeddings = max_position_embeddings
     self.dropout_prob = dropout_prob
     self.initializer_range = initializer_range
+
+    if not initializer:
+      self.initializer = get_initializer(self.initializer_range)
+    else:
+      self.initializer = initializer
 
     if self.use_type_embeddings and not self.token_type_vocab_size:
       raise ValueError("If `use_type_embeddings` is True, then "
@@ -310,8 +317,9 @@ class EmbeddingPostprocessor(tf.keras.layers.Layer):
           dtype=self.dtype)
 
     self.output_layer_norm = tf.keras.layers.LayerNormalization(
-        name="layer_norm", axis=-1, epsilon=1e-12)
-    self.output_dropout = tf.keras.layers.Dropout(rate=self.dropout_prob)
+        name="layer_norm", axis=-1, epsilon=1e-12, dtype=tf.float32)
+    self.output_dropout = tf.keras.layers.Dropout(rate=self.dropout_prob,
+                                                  dtype=tf.float32)
     super(EmbeddingPostprocessor, self).build(input_shapes)
 
   def __call__(self, word_embeddings, token_type_ids=None, **kwargs):
@@ -708,11 +716,15 @@ class TransformerBlock(tf.keras.layers.Layer):
         rate=self.hidden_dropout_prob)
     self.attention_layer_norm = (
         tf.keras.layers.LayerNormalization(
-            name="self_attention_layer_norm", axis=-1, epsilon=1e-12))
+            name="self_attention_layer_norm", axis=-1, epsilon=1e-12,
+            # We do layer norm in float32 for numeric stability.
+            dtype=tf.float32))
     self.intermediate_dense = Dense2DProjection(
         output_size=self.intermediate_size,
         kernel_initializer=get_initializer(self.initializer_range),
         activation=self.intermediate_activation,
+        # Uses float32 so that gelu activation is done in float32.
+        dtype=tf.float32,
         name="intermediate")
     self.output_dense = Dense2DProjection(
         output_size=self.hidden_size,
@@ -720,8 +732,17 @@ class TransformerBlock(tf.keras.layers.Layer):
         name="output")
     self.output_dropout = tf.keras.layers.Dropout(rate=self.hidden_dropout_prob)
     self.output_layer_norm = tf.keras.layers.LayerNormalization(
-        name="output_layer_norm", axis=-1, epsilon=1e-12)
+        name="output_layer_norm", axis=-1, epsilon=1e-12, dtype=tf.float32)
     super(TransformerBlock, self).build(unused_input_shapes)
+
+  def common_layers(self):
+    """Explicitly gets all layer objects inside a Transformer encoder block."""
+    return [
+        self.attention_layer, self.attention_output_dense,
+        self.attention_dropout, self.attention_layer_norm,
+        self.intermediate_dense, self.output_dense, self.output_dropout,
+        self.output_layer_norm
+    ]
 
   def __call__(self, input_tensor, attention_mask=None):
     inputs = pack_inputs([input_tensor, attention_mask])
@@ -738,6 +759,10 @@ class TransformerBlock(tf.keras.layers.Layer):
     attention_output = self.attention_dropout(attention_output)
     # Use float32 in keras layer norm and the gelu activation in the
     # intermediate dense layer for numeric stability
+    # TODO(reedwm): These casts are probably unnecessary, as we passed
+    # dtype=tf.float32 to the layer norm constructor, so it will cast its inputs
+    # to float32 automatically. These manual casts additionally do the "+"
+    # operator in float32, but "+" is numerically stable in float16.
     if self.float_type == tf.float16:
       input_tensor = tf.cast(input_tensor, tf.float32)
       attention_output = tf.cast(attention_output, tf.float32)

@@ -35,8 +35,8 @@ from official.bert import model_saving_utils
 from official.bert import model_training_utils
 from official.bert import modeling
 from official.bert import optimization
-from official.bert import tpu_lib
 from official.utils.misc import keras_utils
+from official.utils.misc import tpu_lib
 
 flags.DEFINE_enum(
     'mode', 'train_and_eval', ['train_and_eval', 'export_only'],
@@ -48,10 +48,6 @@ flags.DEFINE_string('train_data_path', None,
                     'Path to training data for BERT classifier.')
 flags.DEFINE_string('eval_data_path', None,
                     'Path to evaluation data for BERT classifier.')
-flags.DEFINE_string(
-    'model_export_path', None,
-    'Path to the directory, where trainined model will be '
-    'exported.')
 # Model training specific flags.
 flags.DEFINE_string(
     'input_meta_data_path', None,
@@ -210,7 +206,7 @@ def run_bert(strategy, input_meta_data):
       run_eagerly=FLAGS.run_eagerly)
 
   if FLAGS.model_export_path:
-    with tf.device(model_training_utils.get_primary_cpu_task(use_remote_tpu)):
+    with tf.device(tpu_lib.get_primary_cpu_task(use_remote_tpu)):
       model_saving_utils.export_bert_model(
           FLAGS.model_export_path, model=trained_model)
   return trained_model
